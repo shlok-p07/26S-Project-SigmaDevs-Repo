@@ -100,7 +100,7 @@ def SideBarLinks(show_home=False):
     """
 
     # Logo appears at the top of the sidebar on every page
-    st.sidebar.image("assets/logo.png", width=360)
+    st.sidebar.image("assets/logo.png", width="stretch")
 
     # If no one is logged in, send them to the Home (login) page
     if "authenticated" not in st.session_state:
@@ -129,6 +129,14 @@ def SideBarLinks(show_home=False):
             st.sidebar.page_link(
                 "pages/04_Trading_Logs.py",
                 label="Trading Logs"
+            )
+            st.sidebar.page_link(
+                "pages/05_Market_Overview.py",
+                label="Market Overview"
+            )
+            st.sidebar.page_link(
+                "pages/06_Stock_Lookup.py",
+                label="Stock Lookup & Backtest"
             )
         if st.session_state["role"] == "data_analyst":
             data_analyst_home_nav()

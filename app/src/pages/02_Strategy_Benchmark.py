@@ -1,209 +1,259 @@
 import logging
 logger = logging.getLogger(__name__)
 
-import streamlit as st
-import pandas as pd
-import requests
-from modules.nav import SideBarLinks
+from datetime import date
 
-st.set_page_config(layout='wide')
+import pandas as pd
+import plotly.graph_objects as go
+import streamlit as st
+from modules.nav import SideBarLinks
+from modules import quant_ui as ui
+
+st.set_page_config(layout='wide', page_title="Strategy vs Benchmark · PortIQ")
 
 SideBarLinks()
 
-st.header("Strategy vs Benchmark")
+ui.setup_page("Strategy vs Benchmark",
+              "Is the strategy beating its benchmark, how much market risk it takes, and where the gap came from.")
 
-st.write(f"### Hi, {st.session_state['first_name']}.")
-
-all_strategies_res = requests.get("http://web-api:4000/strategies/")
-if all_strategies_res.status_code != 200:
-    st.error("Failed to load strategies.")
+scorecard, err = ui.load_scorecard()
+if err:
+    st.error(f"Could not load strategies. {err}")
     st.stop()
+my_ids = ui.my_portfolio_ids()
 
-all_strategies = all_strategies_res.json()
-strategy_options = {
-    f"{s['strategy_id']} - {s['strategy_name']}": s['strategy_id']
-    for s in all_strategies
-}
+# ---- Filters ------------------------------------------------------------------
 
-selected_strategy = st.selectbox(
-    "Select Strategy",
-    list(strategy_options.keys()),
-    index=0
+f1, f2, f3 = st.columns([4, 2, 3])
+desk = f2.toggle("Include desk strategies", value=False)
+pool = scorecard if desk else scorecard[scorecard.portfolio_id.isin(my_ids)]
+labels = {r.strategy_id: f"{ui.VERDICT_ICON[r.verdict_status]} {r.strategy_name} · {r.strategy_type} · #{r.strategy_id}"
+          for r in pool.itertuples()}
+preselected = st.session_state.get("selected_strategy")
+if preselected not in labels and preselected in scorecard.strategy_id.values:
+    pool, desk = scorecard, True
+    labels = {r.strategy_id: f"{ui.VERDICT_ICON[r.verdict_status]} {r.strategy_name} · {r.strategy_type} · #{r.strategy_id}"
+              for r in pool.itertuples()}
+ids = list(labels)
+strategy_id = f1.selectbox("Strategy", ids, format_func=labels.get,
+                           index=ids.index(preselected) if preselected in ids else 0)
+st.session_state["selected_strategy"] = strategy_id
+window = f3.segmented_control("Period", list(ui.RANGE_DAYS), default="1Y") or "1Y"
+
+s = scorecard.set_index("strategy_id").loc[strategy_id]
+
+st.markdown(
+    f'{ui.badge(s.status.capitalize(), "good" if s.status.lower() == "active" else "warning")} '
+    f'{ui.badge(s.verdict, s.verdict_status)} '
+    f'<span class="qt-card-sub">&nbsp; Parameters <code>{s.parameter}</code> · '
+    f'Benchmark {s.benchmark_name} ({s.benchmark_ticker}) · {s.portfolio_name}</span>',
+    unsafe_allow_html=True,
 )
 
-strategy_id = strategy_options[selected_strategy]
-
-
-
-
-strategy_res = requests.get(f"http://web-api:4000/strategies/{strategy_id}")
-performance_res = requests.get(f"http://web-api:4000/strategies/{strategy_id}/performance")
-benchmark_res = requests.get(f"http://web-api:4000/strategies/{strategy_id}/benchmark")
-
-strategy = strategy_res.json()
-performance = performance_res.json()
-benchmark = benchmark_res.json()
-if strategy_res.status_code !=200:
-    st.error(f"Could not load strategy data: {strategy}")
+hist, herr = ui.api_get(f"/quant/strategies/{strategy_id}/history")
+if herr:
+    st.info("No daily history for this strategy yet.")
     st.stop()
-if not isinstance(strategy, dict):
-    st.error("Strategy response is not in the expected format.")
-    st.write(strategy)
-    st.stop()
+full = ui.to_frame(hist, ("port_value", "daily_PNL", "benchmark_close", "growth_index")).dropna(
+    subset=["benchmark_close"])
+full["record_date"] = pd.to_datetime(full.record_date)
+h = ui.trim_range(full, window)
+stats = ui.perf_stats(h.growth_index, h.benchmark_close)
+period = "since start" if window == "Since start" else window
 
-st.subheader("Strategy Overview")
-col1, col2, col3 = st.columns(3)
-col1.metric("Strategy:", strategy["strategy_name"])
-col2.metric("Type:", strategy['strategy_type'])
-col3.metric('Status:', strategy['status'])
+# ---- KPIs ---------------------------------------------------------------------
 
-st.divider()
+ui.kpi_row([
+    ui.kpi(f"Strategy {period}", ui.pct(stats["return"], 1, sign=True),
+           note=f"{ui.money(h.daily_PNL.iloc[1:].sum(), sign=True)} P&L"),
+    ui.kpi(f"{s.benchmark_ticker} {period}", ui.pct(stats["bench_return"], 1, sign=True), note="benchmark"),
+    ui.kpi("Excess return", ui.pct(stats["excess"], 1, sign=True),
+           delta="Beating" if stats["excess"] >= 0 else "Lagging", delta_good=stats["excess"] >= 0,
+           note="the benchmark"),
+    ui.kpi("Beta", ui.num(stats["beta"]), note=f"correlation {ui.num(stats['correlation'])}"),
+    ui.kpi("Information ratio", ui.num(stats["info_ratio"]), note="excess return vs. tracking risk"),
+    ui.kpi(f"Max drawdown {period}", ui.pct(stats["max_dd"]),
+           delta="Within limit" if stats["max_dd"] <= ui.DRAWDOWN_MAX else "Over limit",
+           delta_good=stats["max_dd"] <= ui.DRAWDOWN_MAX, note=f"limit {ui.pct(ui.DRAWDOWN_MAX, 0)}"),
+])
 
-st.subheader("Performance")
-latest_perf = None
-if performance_res.status_code == 200 and isinstance(performance, list) and len(performance) > 0:
-    perf_df = pd.DataFrame(performance)
-    latest_perf = perf_df.iloc[0]
-    col1,col2,col3 = st.columns(3)
-    col1.metric("Portfolio Value:", f"${latest_perf['port_value']:,.2f}")
-    col2.metric(
-        "Daily P&L:",
-        f"${latest_perf['daily_PNL']:,.2f}",
-        delta=f"{latest_perf['daily_PNL']:,.2f}"
-    )
-    col3.metric(
-        "Cumulative P&L:",
-        f"${latest_perf['cumulative_PNL']:,.2f}",
-        delta=f"{latest_perf['cumulative_PNL']:,.2f}"
-    )
-    st.write("### Performance Table")
-    st.dataframe(perf_df, use_container_width=True, hide_index=True)
-else:
-    st.info("No performance data found.")
-st.divider()
+# ---- Growth -------------------------------------------------------------------
 
-st.subheader("Benchmark Overview")
-latest_bench = None
-if benchmark_res.status_code == 200 and isinstance(benchmark, list) and len(benchmark) > 0:
-    bench_df = pd.DataFrame(benchmark)
-    latest_bench = bench_df.iloc[0]
-    col1,col2,col3=st.columns(3)
-    col1.markdown("Benchmark:")
-    col1.markdown(f"{latest_bench.get('benchmark_name')}")
-    col2.metric("Ticker:", latest_bench.get("ticker"))
-    col3.metric("Value:",
-                f"${latest_bench.get('current_value')}"
-                )
-    st.write("### Benchmark Table")
-    st.dataframe(bench_df, use_container_width=True, hide_index = True)
-else:
-    st.info("No benchmark data found.")
-st.divider()
+with st.container(border=True):
+    ui.card_header(f"{s.strategy_name} vs. {s.benchmark_name}",
+                   f"{'Since the strategy started' if window == 'Since start' else 'Last ' + window}, "
+                   "time-weighted, both indexed to 100")
+    ui.show(ui.indexed_growth_chart(h.record_date, [
+        (s.strategy_name, h.growth_index, ui.SERIES_1, 2),
+        (f"{s.benchmark_ticker} benchmark", h.benchmark_close, ui.BENCHMARK, 1.5),
+    ], height=360))
 
+# ---- Relative performance + drawdown -----------------------------------------
 
-st.subheader("Comparison Summary")
-compare_measures = [
-    "Strategy Name",
-    "Strategy Type",
-    "Strategy Status",
-    "Portfolio Value",
-    "Daily P&L",
-    "Cumulative P&L",
-]
-compare_values = [
-    strategy["strategy_name"],
-    strategy["strategy_type"],
-    strategy["status"],
-    f"${latest_perf['port_value']:,.2f}" if latest_perf is not None else "N/A",
-    f"${latest_perf['daily_PNL']:,.2f}" if latest_perf is not None else "N/A",
-    f"${latest_perf['cumulative_PNL']:,.2f}" if latest_perf is not None else "N/A",
-]
-if latest_bench is not None:
-    compare_measures += ["Benchmark Name", "Benchmark Ticker", "Benchmark Value"]
-    compare_values += [
-        latest_bench["benchmark_name"],
-        latest_bench["ticker"],
-        f"${float(latest_bench['current_value']):,.2f}",
-    ]
-compare_df = pd.DataFrame({"Measure": compare_measures, "Value": compare_values})
+left, right = st.columns(2, gap="medium")
+strat_idx = h.growth_index / h.growth_index.iloc[0]
+bench_idx = h.benchmark_close / h.benchmark_close.iloc[0]
 
-st.dataframe(compare_df, use_container_width=True,hide_index=True)
+with left:
+    with st.container(border=True):
+        ui.card_header("Cumulative excess return", "Strategy growth minus benchmark growth; above zero means ahead")
+        excess = (strat_idx - bench_idx) * 100
+        fig = go.Figure(go.Scatter(
+            x=h.record_date, y=excess, mode="lines", line=dict(color=ui.SERIES_1, width=2),
+            fill="tozeroy", fillcolor="rgba(57,135,229,0.12)",
+            hovertemplate="%{x|%b %d}: %{y:+.1f} pts<extra></extra>",
+        ))
+        fig.add_hline(y=0, line=dict(color=ui.AXIS, width=1))
+        fig.update_yaxes(ticksuffix=" pts")
+        ui.show(ui.style_fig(fig, height=260, legend=False))
 
-st.divider()
+with right:
+    with st.container(border=True):
+        ui.card_header("Drawdown from peak", f"Red line marks the {ui.pct(ui.DRAWDOWN_MAX, 0)} risk limit")
+        underwater = -(1 - h.growth_index / h.growth_index.cummax()) * 100
+        fig = go.Figure(go.Scatter(
+            x=h.record_date, y=underwater, mode="lines", line=dict(color=ui.CRITICAL, width=1.5),
+            fill="tozeroy", fillcolor="rgba(208,59,59,0.15)",
+            hovertemplate="%{x|%b %d}: %{y:.1f}% from peak<extra></extra>",
+        ))
+        fig.add_hline(y=-ui.DRAWDOWN_MAX * 100, line=dict(color=ui.CRITICAL, width=1, dash="dot"),
+                      annotation_text="limit", annotation_font_color=ui.INK_2,
+                      annotation_position="bottom left")
+        fig.update_yaxes(ticksuffix="%", range=[min(underwater.min(), -ui.DRAWDOWN_MAX * 100) * 1.15, 0.5])
+        ui.show(ui.style_fig(fig, height=260, legend=False))
 
-#Strategy Controls
-st.subheader("Update Strategy")
+# ---- Daily P&L + monthly returns ---------------------------------------------
 
-left_col, right_col = st.columns(2)
-with left_col:
-    new_parameter = st.text_input(
-        "Update Parameter",
-        value = strategy["parameter"]
-    )
-    if st.button("Save Parameter", use_container_width=True):
-        payload = {"parameter": new_parameter}
-        update_res=requests.put(
-            f"http://web-api:4000/strategies/{strategy_id}",
-            json=payload
+left, right = st.columns([7, 5], gap="medium")
+
+with left:
+    with st.container(border=True):
+        recent = full.tail(30)
+        ui.card_header("Daily P&L", "Last 30 trading days")
+        fig = go.Figure(go.Bar(
+            x=recent.record_date, y=recent.daily_PNL,
+            marker=dict(color=[ui.GOOD if v >= 0 else ui.CRITICAL for v in recent.daily_PNL], cornerradius=3),
+            hovertemplate="%{x|%b %d}: $%{y:,.0f}<extra></extra>",
+        ))
+        fig.update_yaxes(tickprefix="$", tickformat="~s")
+        fig = ui.style_fig(fig, height=260, legend=False)
+        fig.update_layout(bargap=0.35)
+        ui.show(fig)
+        wins = (recent.daily_PNL > 0).sum()
+        best = ui.money(recent.daily_PNL.max(), sign=True).replace("$", r"\$")
+        worst = ui.money(recent.daily_PNL.min(), sign=True).replace("$", r"\$")
+        st.caption(f"Win rate {wins}/{len(recent)} days ({wins / len(recent):.0%}) · best {best} · worst {worst}")
+
+with right:
+    with st.container(border=True):
+        ui.card_header("Monthly returns", "Strategy vs. benchmark by calendar month")
+        monthly = (full.set_index("record_date")[["growth_index", "benchmark_close"]]
+                   .resample("ME").last())
+        start = full.set_index("record_date")[["growth_index", "benchmark_close"]].iloc[0]
+        rets = monthly.pct_change()
+        rets.iloc[0] = monthly.iloc[0] / start - 1
+        table = pd.DataFrame({
+            "Month": monthly.index.strftime("%b %Y"),
+            "Strategy": rets.growth_index.values * 100,
+            "Benchmark": rets.benchmark_close.values * 100,
+        })
+        table["Excess"] = table.Strategy - table.Benchmark
+        st.dataframe(
+            table.iloc[::-1], hide_index=True, use_container_width=True, height=320,
+            column_config={c: st.column_config.NumberColumn(c, format="%+.1f%%")
+                           for c in ("Strategy", "Benchmark", "Excess")},
         )
-        if update_res.status_code == 200:
-            st.success("Strategy parameter updated successfully.")
-        else: 
-            st.error("Failed to update parameter.")
-with right_col:
-    current_status = strategy.get("status",'active')
-    if current_status == "active" or current_status == "Active":
-        status_index=0
-    else: 
-        status_index=1
-    new_status = st.selectbox(
-        "Update Status",
-        ["active","inactive"],
-        index=status_index
-    )
-    if st.button("Save Status", use_container_width=True):
-        payload = {"status": new_status}
-        update_res=requests.put(
-            f"http://web-api:4000/strategies/{strategy_id}",
-            json=payload
-        )
-        if update_res.status_code ==200:
-            st.success("Strategy status updated successfully.")
-        else: 
-            st.error("Failed to update status.")
-st.divider()
 
-#Create new strategy
+# ---- How this strategy was backtested --------------------------------------------
 
-st.subheader("Create New Strategy")
-with st.form("create_strategy_form"):
-    create_col1, create_col2 = st.columns(2)
-    with create_col1:
-        strategy_name = st.text_input("Strategy Name")
-        strategy_type = st.text_input("Strategy Type")
-        parameter = st.text_input("Parameter")
-        status = st.selectbox("Status", ["active","inactive"])
-    with create_col2:
-        new_strategy_id = st.number_input("Strategy ID", min_value=1, value=20001, step=1)
-        trade_strat = st.number_input("Trade ID", min_value=1, value = 15001, step=1)
-        port_strat= st.number_input("Portfolio ID", min_value=1, value = 101,step=1)
-    create_submitted = st.form_submit_button("Create Strategy")
-    if create_submitted:
-        payload = {
-            "strategy_name": strategy_name,
-            "strategy_type": strategy_type,
-            "parameter": parameter,
-            "status": status,
-            "strategy_id": int(new_strategy_id),
-            "trade_strat": int(trade_strat),
-            "port_strat": int(port_strat)
-        }
-        create_res = requests.post(
-            "http://web-api:4000/strategies",
-            json=payload
-        )
-        if create_res.status_code==200 or create_res.status_code==201:
-            st.success("New Strategy created successfully.")
-        else: 
-            st.error("failed to create strategy.")
-            st.write("Please fill out every field.")
+bt, bt_err = ui.api_get(f"/quant/strategies/{strategy_id}/backtest")
+with st.container(border=True):
+    ui.card_header("How this strategy is backtested",
+                   "Rules run on real daily prices from the strategy's start date; no look-ahead")
+    if bt_err:
+        st.info("Showing demo data. Refresh market data on the Home page to backtest this strategy on real prices.")
+    else:
+        left, right = st.columns([3, 2], gap="medium")
+        with left:
+            hedge = f" · hedge/benchmark leg: **{bt['hedge_ticker']}**" if bt.get("hedge_ticker") else ""
+            st.markdown(f"**{bt['engine']}** on **{bt['ticker']}**{hedge}")
+            st.markdown(ui.describe_rules(bt["engine"], bt["params_used"]))
+            st.markdown(f"Parameters used: `{bt['params_used']}`")
+            if bt.get("params_note"):
+                st.markdown(ui.badge("Parameter mismatch", "warning") +
+                            f'<span class="qt-card-sub">&nbsp; {bt["params_note"]}</span>', unsafe_allow_html=True)
+            st.caption(f"Idle cash earns the 3-month T-bill rate. Each trade pays {float(bt['cost_bps']):g} bps "
+                       f"of the amount traded. Risk metrics use the trailing {bt['metrics_window_days']} trading days.")
+        with right:
+            beat = float(bt["total_return"]) >= float(bt["buy_hold_return"])
+            st.markdown("".join([
+                '<div class="qt-kpis">',
+                ui.kpi("Strategy since start", ui.pct(float(bt["total_return"]), 1, sign=True),
+                       note=f"CAGR {ui.pct(float(bt['cagr']), 1, sign=True)}" if bt.get("cagr") is not None
+                       else f"{bt['trading_days']} trading days"),
+                ui.kpi(f"Buy and hold {bt['ticker']}", ui.pct(float(bt["buy_hold_return"]), 1, sign=True),
+                       delta="Rules beat holding" if beat else "Holding did better", delta_good=beat),
+                '</div><div class="qt-kpis">',
+                ui.kpi("Trades", f"{bt['trades_count']}", f"turnover {float(bt['turnover']):.1f}x"),
+                ui.kpi("Started", date.fromisoformat(bt["start_date"]).strftime("%b %d, %Y"),
+                       f"{ui.money(float(bt['initial_capital']))} initial"
+                       + (f" + {ui.money(float(bt['contributions']))} added" if float(bt["contributions"]) else "")),
+                '</div>',
+            ]), unsafe_allow_html=True)
+
+# ---- Manage strategies --------------------------------------------------------
+
+with st.container(border=True):
+    ui.card_header("Manage strategies")
+    ui.show_flash()
+    tune, create = st.tabs(["Tune this strategy", "Create a strategy"])
+
+    with tune:
+        c1, c2 = st.columns([3, 2])
+        with c1:
+            with st.form("tune_form", border=False):
+                new_parameter = st.text_input("Parameters", value=s.parameter,
+                                              help="Comma-separated settings, e.g. lookback=30,stop=0.03")
+                if st.form_submit_button("Save parameters", type="primary"):
+                    ui.write_and_refresh("PUT", f"/strategies/{strategy_id}", {"parameter": new_parameter},
+                                         success="Parameters saved.")
+        with c2:
+            is_active = s.status.lower() == "active"
+            st.write("")
+            st.markdown(f"Currently **{'active' if is_active else 'inactive'}**.")
+            if st.button("Pause strategy" if is_active else "Resume strategy", use_container_width=True):
+                ui.write_and_refresh("PUT", f"/strategies/{strategy_id}",
+                                     {"status": "inactive" if is_active else "active"},
+                                     success=f"{s.strategy_name} {'paused' if is_active else 'resumed'}.")
+
+    with create:
+        portfolios, _ = ui.api_get(f"/portfolios/user/{st.session_state.get('user_id', 1)}")
+        trades, _ = ui.api_get("/trades/")
+        with st.form("create_strategy_form", clear_on_submit=True, border=False):
+            a, b = st.columns(2)
+            name = a.text_input("Strategy name", placeholder="e.g. Semiconductor Momentum")
+            stype = b.selectbox("Type", sorted(scorecard.strategy_type.unique()))
+            parameter = a.text_input("Parameters", placeholder="lookback=20,stop=0.02")
+            status = b.segmented_control("Starting status", ["active", "inactive"], default="inactive")
+            port_labels = {p["portfolio_id"]: f'{p["portfolio_name"]} · #{p["portfolio_id"]}' for p in portfolios or []}
+            port = a.selectbox("Portfolio", list(port_labels), format_func=port_labels.get)
+            trade_labels = {t["trade_id"]: f'#{t["trade_id"]} · {t["trade_type"]} {t.get("ticker") or ""}'
+                            for t in trades or []}
+            trade = b.selectbox("Seed trade", list(trade_labels), format_func=trade_labels.get,
+                                help="Every strategy is linked to the trade that opened it")
+            if st.form_submit_button("Create strategy", type="primary"):
+                if not name.strip():
+                    st.error("Give the strategy a name.")
+                else:
+                    ui.write_and_refresh("POST", "/strategies/", {
+                        "strategy_name": name.strip(), "strategy_type": stype, "parameter": parameter,
+                        "status": status or "inactive", "trade_strat": int(trade), "port_strat": int(port),
+                    }, success="Created strategy #{strategy_id}.")
+
+with st.expander("View daily data"):
+    st.dataframe(full.iloc[::-1], hide_index=True, use_container_width=True, column_config={
+        "record_date": st.column_config.DateColumn("Date"),
+        "port_value": st.column_config.NumberColumn("Value ($)", format=ui.MONEY),
+        "daily_PNL": st.column_config.NumberColumn("Daily P&L ($)", format=ui.MONEY),
+        "benchmark_close": st.column_config.NumberColumn(f"{s.benchmark_ticker} close", format="%.2f"),
+    })

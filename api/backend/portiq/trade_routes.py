@@ -14,8 +14,10 @@ def get_all_trades():
     try:
         current_app.logger.info(f'GET /trades')
         query = """
-                SELECT *
-                from Trade
+                SELECT t.*, a.ticker, a.asset_name
+                from Trade t
+                LEFT JOIN Asset a ON a.asset_id = t.trade_asset
+                ORDER BY t.trade_date DESC
                 """
         cursor.execute(query)
         trades = cursor.fetchall()
@@ -40,6 +42,8 @@ def get_trade(trade_id):
                 """
         cursor.execute(query, (trade_id,))
         trade = cursor.fetchone()
+        if not trade:
+            return jsonify({"error": "Trade not found"}), 404
         return jsonify(trade), 200
     except Error as e:
         current_app.logger.error(f'Database error in get_trade: {e}')
@@ -55,6 +59,10 @@ def create_trade():
     try:
         current_app.logger.info(f'POST /trades')
         data = request.get_json()
+        # Assign the next ID when the client doesn't supply one
+        if not data.get("trade_id"):
+            cursor.execute("SELECT COALESCE(MAX(trade_id), 0) + 1 AS next_id FROM Trade")
+            data["trade_id"] = cursor.fetchone()["next_id"]
         query = """
                 INSERT INTO Trade
                 (trade_type, trade_date, quantity, price, trade_id, trade_asset)
@@ -68,8 +76,10 @@ def create_trade():
                     data["trade_asset"]
                        ))
         get_db().commit()
-        return jsonify({"message": "Trade Created"}), 201
+        return jsonify({"message": "Trade Created", "trade_id": data["trade_id"]}), 201
     except Error as e:
+        if e.errno == 1062:
+            return jsonify({"error": f"Trade ID {data['trade_id']} already exists"}), 409
         current_app.logger.error(f'Database error in create_trade: {e}')
         return jsonify({"error": str(e)}), 500
     finally:
@@ -115,6 +125,15 @@ def delete_trade(trade_id):
     cursor = get_db().cursor(dictionary=True)
     try:
         current_app.logger.info(f'DELETE /trades/{trade_id}')
+        # Strategy.trade_strat cascades on delete, so removing a trade that
+        # opened a strategy would silently delete the strategy and its history.
+        cursor.execute("SELECT strategy_id, strategy_name FROM Strategy WHERE trade_strat = %s",
+                       (trade_id,))
+        linked = cursor.fetchall()
+        if linked:
+            names = ", ".join(f"'{r['strategy_name']}' (#{r['strategy_id']})" for r in linked)
+            return jsonify({"error": f"Trade #{trade_id} opened strategy {names}. "
+                                     "Delete or relink the strategy before deleting this trade."}), 409
         query = """
                DELETE from Trade
                where trade_id = %s

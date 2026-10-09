@@ -25,6 +25,18 @@ services:
     ports:
       - 4000:4000
 
+  # Refreshes market data every weekday after the close (see api/backend/market/scheduler.py)
+  scheduler:
+    build: ./api
+    container_name: market-scheduler
+    volumes: ["./api:/apicode"]
+    env_file:
+      - ./api/.env
+    command: ["python", "-u", "-m", "backend.market.scheduler"]
+    depends_on:
+      - db
+    restart: unless-stopped
+
   db:
     env_file:
       - ./api/.env

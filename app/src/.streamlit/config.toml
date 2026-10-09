@@ -13,11 +13,16 @@
 showSidebarNavigation = false
 
 [theme]
-# Setting some basic config options related to the theme of the app
+# Professional dark theme (validated chart palette; see app/src/modules/quant_ui.py)
 base="dark"
-primaryColor="#ababab6a"
-font="monospace"
-textColor = "#0dc228d3"
+primaryColor="#3987e5"
+backgroundColor="#0d0d0d"
+secondaryBackgroundColor="#1a1a19"
+textColor="#f2f1ec"
+font="sans-serif"
+borderColor="#2c2c2a"
+baseRadius="10px"
+chartCategoricalColors=["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9", "#e66767"]
 
 [server]
 runOnSave = true

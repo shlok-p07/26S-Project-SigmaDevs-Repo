@@ -36,6 +36,10 @@ def create_strategy():
     try:
         current_app.logger.info("POST /strategies")
         data = request.get_json()
+        # Assign the next ID when the client doesn't supply one
+        if not data.get("strategy_id"):
+            cursor.execute("SELECT COALESCE(MAX(strategy_id), 0) + 1 AS next_id FROM Strategy")
+            data["strategy_id"] = cursor.fetchone()["next_id"]
 
         query = """
                 Insert INTO Strategy
@@ -52,8 +56,10 @@ def create_strategy():
             data['port_strat']
         ))
         get_db().commit()
-        return jsonify({"message":"Strategy created"}), 200
+        return jsonify({"message":"Strategy created", "strategy_id": data["strategy_id"]}), 200
     except Error as e:
+        if e.errno == 1062:
+            return jsonify({"error": f"Strategy ID {data['strategy_id']} already exists"}), 409
         current_app.logger.error(f"Database error in create_strategy: {e}")
         return jsonify({"error": str(e)}), 500
     finally:
