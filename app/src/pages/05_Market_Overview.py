@@ -17,7 +17,7 @@ ui.setup_page("Market Overview",
 universe = ui.universe_status()
 st.caption(ui.universe_line(universe))
 job = universe.get("latest_job") or {}
-if job.get("status") == "running" and job.get("message", "").split(" of ")[0].isdigit():
+if job.get("status") == "running" and (job.get("message") or "").split(" of ")[0].isdigit():
     done, _, rest = job["message"].partition(" of ")
     total = int(rest.split()[0])
     st.progress(min(int(done) / max(total, 1), 1.0), text=f"Loading prices: {int(done):,} of {total:,} securities")

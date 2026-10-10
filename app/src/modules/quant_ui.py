@@ -240,7 +240,7 @@ def universe_line(status=None):
     nxt = pd.Timestamp(u["next_scheduled"]).strftime("%a %b %d, %-I:%M %p ET") if u.get("next_scheduled") else "—"
     job = u.get("latest_job") or {}
     if job.get("status") == "running":
-        return f"Loading the market universe: {job.get('message', '')} · next scheduled update {nxt}"
+        return f"Loading the market universe: {job.get('message') or 'starting'} · next scheduled update {nxt}"
     as_of = pd.Timestamp(u["as_of"]).strftime("%b %d") if u.get("as_of") else "—"
     return (f"{u['current']:,} of {u['securities']:,} U.S. stocks and ETFs current through {as_of} · "
             f"updates daily after the close · next {nxt}")
